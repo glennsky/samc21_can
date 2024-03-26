@@ -9,7 +9,9 @@
 #include "samc21_can.h"
 #include "Arduino.h"
 
-SAMC21_CAN *samc21_can_use_object[2];
+#include "tpg_rprintf.h"
+
+SAMC21_CAN *use_object;
 
 
 /**
@@ -19,46 +21,38 @@ SAMC21_CAN *samc21_can_use_object[2];
 *
 * @return void
 */
-SAMC21_CAN::SAMC21_CAN(uint8_t _CS, uint8_t canid, uint8_t cantx, uint8_t group)
-    : rx_ded_buffer_data(false), _idmode(MCP_ANY), _mode(MCP_LOOPBACK), _cs(_CS), _canid(canid),
-      _cantx(cantx), _canrx(cantx + 1), _group(group & 1)
+SAMC21_CAN::SAMC21_CAN(uint8_t _CS)
+    : rx_ded_buffer_data(false), _idmode(MCP_ANY), _mode(MCP_LOOPBACK), _cs(_CS)
 {
-    if (_canid == ID_CAN0) {
-        samc21_can_use_object[0] = this;
-    } else if (_canid == ID_CAN1) {
-        samc21_can_use_object[0] = this;
-    }
+    use_object = this;
 };
 
 uint8_t SAMC21_CAN::begin(uint8_t idmodeset, uint32_t speedset, uint8_t clockset)
 {
     uint8_t ret;
     _idmode = idmodeset;
-    if ((_canid != ID_CAN0) && (_canid != ID_CAN1)) {
-        return CAN_FAIL;  // Don't know what this is
-    }
     const struct mcan_config mcan_cfg = {
 
 id :
-        _canid,
+        ID_CAN0,
 regs :
-        ((_canid == ID_CAN0) ? CAN0 : CAN1),
-        msg_ram :
+        CAN0,
+msg_ram :
         mcan_msg_ram,
 
-        array_size_filt_std :
+array_size_filt_std :
         RAM_ARRAY_SIZE_FILT_STD,
-        array_size_filt_ext :
+array_size_filt_ext :
         RAM_ARRAY_SIZE_FILT_EXT,
-        fifo_size_rx0 :
+fifo_size_rx0 :
         RAM_FIFO_SIZE_RX0,
         fifo_size_rx1 : 0,
-        array_size_rx :
+array_size_rx :
         RAM_ARRAY_SIZE_RX,
         fifo_size_tx_evt : 0,
-        array_size_tx :
+array_size_tx :
         RAM_ARRAY_SIZE_TX,
-        fifo_size_tx :
+fifo_size_tx :
         RAM_FIFO_SIZE_TX,
 
         buf_size_rx_fifo0 : 64,
@@ -69,8 +63,9 @@ regs :
         /*
         using values from AT6493 (SAMC21 app note); the plus values are to add on what the MCAN driver subtracts back off
         */
-        bit_rate :
+bit_rate :
         speedset,
+			// for baudrate 125kbps -- see https://electronics.stackexchange.com/questions/478864/atsamc21-can-configuration-nominal-bit-timing-vs-data-bit-timing-time-qua
         quanta_before_sp : 10 + 2,
         quanta_after_sp : 3 + 1,
 
@@ -78,7 +73,7 @@ regs :
         AT6493 (SAMC21 app note) 'fast' values were unhelpfully the same as normal speed; these are for double (1MBit)
                 the maximum peripheral clock of 48MHz on the SAMC21 does restrict us from very high rates
         */
-        bit_rate_fd :
+bit_rate_fd :
         speedset,
         quanta_before_sp_fd : 10 + 2,
         quanta_after_sp_fd : 3 + 1,
@@ -86,30 +81,31 @@ regs :
         quanta_sync_jump : 3 + 1,
         quanta_sync_jump_fd : 3 + 1,
     };
-    PORT->Group[_group].DIRSET.reg = (1 << _cantx);
-    PORT->Group[_group].DIRCLR.reg = (1 << _canrx);
-    PORT->Group[_group].PINCFG[_cantx].reg = PORT_PINCFG_INEN | PORT_PINCFG_PMUXEN;
-    PORT->Group[_group].PINCFG[_canrx].reg = PORT_PINCFG_INEN | PORT_PINCFG_PMUXEN;
-    PORT->Group[_group].PMUX[_cantx / 2].reg = PORT_PMUX_PMUXE(6 /* CAN0 G */) | PORT_PMUX_PMUXO(6 /* CAN0 G */); /* have to write odd and even at once */
     switch (mcan_cfg.id) {
         case ID_CAN0:
+            PORT->Group[0].DIRSET.reg = PORT_PA24;
+            PORT->Group[0].DIRCLR.reg = PORT_PA25;
+            PORT->Group[0].PINCFG[24].reg = PORT_PINCFG_INEN | PORT_PINCFG_PMUXEN;
+            PORT->Group[0].PINCFG[25].reg = PORT_PINCFG_INEN | PORT_PINCFG_PMUXEN;
+            PORT->Group[0].PMUX[24 / 2].reg = PORT_PMUX_PMUXE(6 /* CAN0 G */) | PORT_PMUX_PMUXO(6 /* CAN0 G */); /* have to write odd and even at once */
             GCLK->PCHCTRL[CAN0_GCLK_ID].reg = GCLK_PCHCTRL_CHEN | GCLK_PCHCTRL_GEN_GCLK0;
             MCLK->AHBMASK.reg |= MCLK_AHBMASK_CAN0;
             //NVIC_EnableIRQ(CAN0_IRQn);
             break;
-        case ID_CAN1:
-            GCLK->PCHCTRL[CAN1_GCLK_ID].reg = GCLK_PCHCTRL_CHEN | GCLK_PCHCTRL_GEN_GCLK1;
-            MCLK->AHBMASK.reg |= MCLK_AHBMASK_CAN1;
-            //NVIC_EnableIRQ(CAN0_IRQn);
-            break;
         default:
-            break;
+            return CAN_FAIL;
     }
     if (mcan_configure_msg_ram(&mcan_cfg, &mcan_msg_ram_size)) {
         Serial.println("RAM configuration succeeded");
     } else {
         return CAN_FAIL;
     }
+
+	if (mcan_msg_ram_size > ARRAY_SIZE(mcan_msg_ram)) {
+		Serial.println("-E- Message RAM too small. Please verify its configuration.");
+		return CAN_FAIL;
+	}
+
     ret = mcan_initialize(&mcan, &mcan_cfg);
     if (ret == 0) {
         Serial.println("CAN initialized");
@@ -124,11 +120,13 @@ regs :
     } else {
         mcan_loopback_off(&mcan);
     }
-    mcan_set_mode(&mcan, MCAN_MODE_CAN);
+    mcan_set_mode(&mcan, MCAN_MODE_EXT_LEN_CONST_RATE); // GS -- enable CAN-FD extended packetsMCAN_MODE_CAN);
     mcan_enable(&mcan);
+    
     // Enable chip standby
     pinMode(_cs, OUTPUT);
     digitalWrite(_cs, LOW);
+    
     //mcan_enable_rx_array_flag(&mcan, 0);
     // MCP_ANY means filters don't matter
     if (_idmode == MCP_ANY) {
@@ -195,12 +193,14 @@ uint8_t SAMC21_CAN::setMode(uint8_t opMode)
         _mode = opMode;
         mcan_disable(&mcan);
         mcan_reconfigure(&mcan);
+        mcan_set_mode(&mcan,MCAN_MODE_EXT_LEN_CONST_RATE);  // GS
         mcan_loopback_on(&mcan);
         mcan_enable(&mcan);
     } else if ((opMode == MCP_NORMAL) && (_mode != MCP_NORMAL)) {
         _mode = opMode;
         mcan_disable(&mcan);
         mcan_reconfigure(&mcan);
+        mcan_set_mode(&mcan,MCAN_MODE_EXT_LEN_CONST_RATE);  // GS
         mcan_loopback_off(&mcan);
         mcan_enable(&mcan);
     } else {
@@ -228,11 +228,14 @@ uint8_t SAMC21_CAN::sendMsgBuf(uint32_t id, uint8_t len, uint8_t *buf)
 {
     return sendMsgBuf(id, 1, len, buf);
 };                 // Send message to transmit buffer
+
+
 uint8_t SAMC21_CAN::readMsgBuf(uint32_t *id, uint8_t *ext, uint8_t *len, uint8_t *buf)
 {
+
     struct mcan_msg_info msg;
     msg.data = buf;
-    msg.data_len = 8;
+    msg.data_len = 64;
     uint8_t fifo_entries;
     if (mcan_is_tx_complete(&mcan)) {
         mcan_clear_tx_flag(&mcan);
@@ -240,45 +243,55 @@ uint8_t SAMC21_CAN::readMsgBuf(uint32_t *id, uint8_t *ext, uint8_t *len, uint8_t
     fifo_entries = mcan_dequeue_received_msg(&mcan, 0, &msg);
     if (fifo_entries > 0) {
         *id = mcan_get_id(msg.id);
-        *len = msg.data_len;
+        *len = msg.data_len; //full_len; // GS for CAN-FD long packets
         *ext = (msg.id & CAN_EXT_MSG_ID) == CAN_EXT_MSG_ID;
         return CAN_OK;
     }
+
     return CAN_NOMSG;
 };   // Read message from receive buffer
+
 uint8_t SAMC21_CAN::readMsgBuf(uint32_t *id, uint8_t *len, uint8_t *buf)
 {
     uint8_t ext;
     return readMsgBuf(id, &ext, len, buf);
 };               // Read message from receive buffer
+
 uint8_t SAMC21_CAN::checkReceive(void)
 {
     return (uint8_t)mcan_rx_fifo_data(&mcan, 0);
 };                                           // Check for received data
+
 uint8_t SAMC21_CAN::checkError(void)
 {
     return 0;
 };                                             // Check for errors
+
 uint8_t SAMC21_CAN::getError(void)
 {
     return 0;
 };                                               // Check for errors
+
 uint8_t SAMC21_CAN::errorCountRX(void)
 {
     return 0;
 };                                           // Get error count
+
 uint8_t SAMC21_CAN::errorCountTX(void)
 {
     return 0;
 };                                           // Get error count
+
 uint8_t SAMC21_CAN::enOneShotTX(void)
 {
     return 0;
 };                                            // Enable one-shot transmission
+
 uint8_t SAMC21_CAN::disOneShotTX(void)
 {
     return 0;
 };                                           // Disable one-shot transmission
+
 /*
 void CAN0_Handler(void)
 {

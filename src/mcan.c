@@ -273,6 +273,7 @@ uint8_t mcan_initialize(struct mcan_set *set, const struct mcan_config *cfg)
 	    | CAN_DBTP_DTSEG1(cfg->quanta_before_sp_fd - 1 - 1)
 	    | CAN_DBTP_DTSEG2(cfg->quanta_after_sp_fd - 1)
 	    | CAN_DBTP_DSJW(cfg->quanta_sync_jump_fd - 1);
+//		| CAN_DBTP_TDC;	// GS - added enable transmit delay compensation - see https://community.atmel.com/forum/using-can-fd-samv71-mcu
 
 	/* Configure Message RAM starting addresses and element count */
 	/* 11-bit Message ID Rx Filters */
@@ -540,7 +541,7 @@ uint8_t mcan_enqueue_outgoing_msg(struct mcan_set *set, uint32_t id,
 		*pThisTxBuf++ = MCAN_RAM_BUF_ID_STD(id);
 	val = MCAN_RAM_BUF_MM(0) | MCAN_RAM_BUF_DLC((uint32_t)dlc);
 	if (mode == MCAN_MODE_EXT_LEN_CONST_RATE)
-		val |= MCAN_RAM_BUF_FDF;
+		val |= MCAN_RAM_BUF_FDF; // | MCAN_RAM_BUF_ESI; // GS added ESI for error state indicator
 	else if (mode == MCAN_MODE_EXT_LEN_DUAL_RATE)
 		val |= MCAN_RAM_BUF_FDF | MCAN_RAM_BUF_BRS;
 	*pThisTxBuf++ = val;
